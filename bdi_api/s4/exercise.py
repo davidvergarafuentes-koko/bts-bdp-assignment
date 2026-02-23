@@ -1,5 +1,11 @@
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
 from typing import Annotated
 
+import boto3
+import requests
 from fastapi import APIRouter, status
 from fastapi.params import Query
 
@@ -16,6 +22,38 @@ s4 = APIRouter(
     tags=["s4"],
 )
 
+DAY = "20231101"
+S3_PREFIX = "raw/day=20231101/"  # required by homework
+
+
+def _ensure_clean_dir(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _first_n_filenames(file_limit: int) -> list[str]:
+    # 5-second increments from 00:00:00Z
+    out: list[str] = []
+    for i in range(int(file_limit)):
+        total_seconds = i * 5
+        hh = total_seconds // 3600
+        mm = (total_seconds % 3600) // 60
+        ss = total_seconds % 60
+        out.append(f"{hh:02d}{mm:02d}{ss:02d}Z.json.gz")
+    return out
+
+
+def _day_url() -> str:
+    """
+    Build base URL robustly, regardless of whether Settings().source_url
+    includes /readsb-hist already.
+    """
+    base = settings.source_url.rstrip("/")
+    if base.endswith("/readsb-hist"):
+        return base + "/2023/11/01/"
+    return base + "/readsb-hist/2023/11/01/"
+
 
 @s4.post("/aircraft/download")
 def download_data(
@@ -24,32 +62,75 @@ def download_data(
         Query(
             ...,
             description="""
-    Limits the number of files to download.
-    You must always start from the first the page returns and
-    go in ascending order in order to correctly obtain the results.
-    I'll test with increasing number of files starting from 100.""",
+Limits the number of files to download.
+You must always start from the first file and go in ascending order.
+I'll test with increasing number of files starting from 100.
+""",
         ),
     ] = 100,
 ) -> str:
-    """Same as s1 but store to an aws s3 bucket taken from settings
-    and inside the path `raw/day=20231101/`
-
-    NOTE: you can change that value via the environment variable `BDI_S3_BUCKET`
     """
-    base_url = settings.source_url + "/2023/11/01/"
-    s3_bucket = settings.s3_bucket
-    s3_prefix_path = "raw/day=20231101/"
-    # TODO
+    Downloads aircraft data files from ADS-B Exchange and stores them in S3
+    under raw/day=20231101/
+    """
+    s3 = boto3.client("s3")
+    bucket = settings.s3_bucket
+    day_url = _day_url()
+
+    headers = {"User-Agent": "Mozilla/5.0 bdi-assignment/1.0"}
+
+    for fname in _first_n_filenames(file_limit):
+        url = day_url + fname
+        r = requests.get(url, headers=headers, timeout=60, allow_redirects=True)
+        r.raise_for_status()
+
+        key = S3_PREFIX + fname
+        s3.put_object(Bucket=bucket, Key=key, Body=r.content)
 
     return "OK"
 
 
 @s4.post("/aircraft/prepare")
 def prepare_data() -> str:
-    """Obtain the data from AWS s3 and store it in the local `prepared` directory
-    as done in s1.
-
-    All the `/api/s1/aircraft/` endpoints should work as usual
     """
-    # TODO
-    return "OK"
+    Reads the raw files from S3 and stores them locally (raw/),
+    then prepares them locally (prepared/) in the same way as S1,
+    so S1 query endpoints keep working.
+    """
+    s3 = boto3.client("s3")
+    bucket = settings.s3_bucket
+
+    # 1) Download raw files from S3 to local raw/day=20231101/
+    local_raw_day_dir = Path(settings.raw_dir) / f"day={DAY}"
+    _ensure_clean_dir(local_raw_day_dir)
+
+    keys: list[str] = []
+    token: str | None = None
+
+    while True:
+        kwargs = {"Bucket": bucket, "Prefix": S3_PREFIX}
+        if token:
+            kwargs["ContinuationToken"] = token
+        resp = s3.list_objects_v2(**kwargs)
+
+        for obj in resp.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/") or not key.endswith(".json.gz"):
+                continue
+            keys.append(key)
+
+        if resp.get("IsTruncated"):
+            token = resp.get("NextContinuationToken")
+        else:
+            break
+
+    keys.sort()  # ascending
+
+    for key in keys:
+        fname = key.split("/")[-1]
+        s3.download_file(bucket, key, str(local_raw_day_dir / fname))
+
+    # 2) Reuse S1 prepare to generate the local prepared DB
+    from bdi_api.s1.exercise import prepare_data as s1_prepare
+
+    return s1_prepare()
