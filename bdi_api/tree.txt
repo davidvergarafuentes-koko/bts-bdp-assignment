@@ -1,0 +1,37 @@
+.
+├── app.py
+├── examples
+│   ├── __init__.py
+│   └── __pycache__
+│       └── __init__.cpython-313.pyc
+├── __init__.py
+├── __pycache__
+│   ├── app.cpython-313.pyc
+│   ├── __init__.cpython-313.pyc
+│   └── settings.cpython-313.pyc
+├── s1
+│   ├── exercise.py
+│   ├── __init__.py
+│   ├── __pycache__
+│   │   ├── exercise.cpython-313.pyc
+│   │   └── __init__.cpython-313.pyc
+│   └── README.adoc
+├── s4
+│   ├── exercise.py
+│   ├── __init__.py
+│   ├── __pycache__
+│   │   ├── exercise.cpython-313.pyc
+│   │   └── __init__.cpython-313.pyc
+│   ├── README.adoc
+│   └── requirements.txt
+├── s5
+│   ├── exercise.py
+│   ├── __init__.py
+│   ├── __pycache__
+│   │   ├── exercise.cpython-313.pyc
+│   │   └── __init__.cpython-313.pyc
+│   └── README.adoc
+├── settings.py
+└── tree.txt
+
+10 directories, 25 files
