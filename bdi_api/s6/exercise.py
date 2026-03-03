@@ -1,8 +1,9 @@
 from typing import Annotated
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, HTTPException, status
 from fastapi.params import Query
 from pydantic import BaseModel
+from pymongo import MongoClient, DESCENDING
 
 from bdi_api.settings import Settings
 
@@ -29,6 +30,25 @@ class AircraftPosition(BaseModel):
     timestamp: str
 
 
+def _get_collection():
+    """
+    MongoDB connection helper.
+
+    Uses settings.mongo_url which should come from BDI_MONGO_URL env var.
+    Database name: bdi_aircraft
+    Collection name: positions
+    """
+    client = MongoClient(settings.mongo_url)
+    db = client["bdi_aircraft"]
+    col = db["positions"]
+
+    # Helpful indexes (safe to call multiple times)
+    col.create_index([("icao", 1), ("timestamp", -1)])
+    col.create_index([("type", 1)])
+
+    return col
+
+
 @s6.post("/aircraft")
 def create_aircraft(position: AircraftPosition) -> dict:
     """Store an aircraft position document in MongoDB.
@@ -38,9 +58,11 @@ def create_aircraft(position: AircraftPosition) -> dict:
     Database name: bdi_aircraft
     Collection name: positions
     """
-    # TODO: Connect to MongoDB using pymongo.MongoClient(settings.mongo_url)
-    # TODO: Insert the position document into the 'positions' collection
-    # TODO: Return {"status": "ok"}
+    col = _get_collection()
+
+    # Insert the position as a plain dict
+    col.insert_one(position.model_dump())
+
     return {"status": "ok"}
 
 
@@ -52,10 +74,16 @@ def aircraft_stats() -> list[dict]:
 
     Use MongoDB's aggregation pipeline with $group.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Use collection.aggregate() with $group on 'type' field
-    # TODO: Return list sorted by count descending
-    return []
+    col = _get_collection()
+
+    pipeline = [
+        # If type is missing, it will group under null; that's fine unless your tests expect filtering.
+        {"$group": {"_id": "$type", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$project": {"_id": 0, "type": "$_id", "count": 1}},
+    ]
+
+    return list(col.aggregate(pipeline))
 
 
 @s6.get("/aircraft/")
@@ -74,10 +102,28 @@ def list_aircraft(
     Each result should include: icao, registration, type.
     Use MongoDB's skip() and limit() for pagination.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Query distinct aircraft, apply skip/limit for pagination
-    # TODO: Return list of dicts with icao, registration, type
-    return []
+    col = _get_collection()
+    skip = (page - 1) * page_size
+
+    # Because this is time-series data, return DISTINCT aircraft (unique ICAO),
+    # using the latest seen registration/type for each ICAO.
+    pipeline = [
+        {"$sort": {"timestamp": -1}},
+        {
+            "$group": {
+                "_id": "$icao",
+                "icao": {"$first": "$icao"},
+                "registration": {"$first": "$registration"},
+                "type": {"$first": "$type"},
+            }
+        },
+        {"$sort": {"icao": 1}},  # stable ordering for pagination
+        {"$skip": skip},
+        {"$limit": page_size},
+        {"$project": {"_id": 0, "icao": 1, "registration": 1, "type": 1}},
+    ]
+
+    return list(col.aggregate(pipeline))
 
 
 @s6.get("/aircraft/{icao}")
@@ -87,10 +133,17 @@ def get_aircraft(icao: str) -> dict:
     Return the most recent document matching the given ICAO code.
     If not found, return 404.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Find the latest document for this icao (sort by timestamp descending)
-    # TODO: Return 404 if not found
-    return {}
+    col = _get_collection()
+
+    doc = col.find_one(
+        {"icao": icao},
+        sort=[("timestamp", DESCENDING)],
+        projection={"_id": 0},
+    )
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    return doc
 
 
 @s6.delete("/aircraft/{icao}")
@@ -99,7 +152,7 @@ def delete_aircraft(icao: str) -> dict:
 
     Returns the number of deleted documents.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Delete all documents matching the icao
-    # TODO: Return {"deleted": <count>}
-    return {"deleted": 0}
+    col = _get_collection()
+
+    result = col.delete_many({"icao": icao})
+    return {"deleted": result.deleted_count}
