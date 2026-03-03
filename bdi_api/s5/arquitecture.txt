@@ -1,0 +1,45 @@
+S5 Deployment Architecture
+
+The application is deployed on AWS using a two-tier architecture composed of:
+
+1. EC2 Instance (Application Layer)
+   - Instance type: t2.micro
+   - OS: Ubuntu 22.04 LTS
+   - Runs FastAPI using Uvicorn on port 8080
+   - The API exposes REST endpoints for database initialization, seeding, and data queries.
+   - Security Group allows inbound traffic on:
+       - Port 22 (SSH) from my IP
+       - Port 8080 (HTTP) for API access
+
+2. Amazon RDS PostgreSQL (Database Layer)
+   - Managed PostgreSQL instance
+   - Database name: hr_database
+   - SSL connection required (sslmode=require)
+   - Security Group allows inbound traffic on port 5432
+     only from the EC2 security group (not public access)
+
+Connection Flow
+
+Client (Browser / curl)
+        ↓
+EC2 Public IP:8080
+        ↓
+FastAPI application (Uvicorn)
+        ↓
+SQLAlchemy / psycopg2
+        ↓
+Amazon RDS PostgreSQL (hr_database)
+
+The FastAPI application connects to the RDS database using the environment variable:
+
+BDI_DB_URL=postgresql+psycopg2://postgres:<PASSWORD>@<RDS_ENDPOINT>:5432/hr_database?sslmode=require
+
+Security Considerations
+
+- Database is not publicly accessible.
+- Only EC2 can connect to RDS via Security Group rules.
+- SSL mode is required for encrypted communication.
+- API is exposed via EC2 public IP on port 8080.
+
+This architecture separates the application layer from the database layer,
+improving scalability, security, and maintainability.
