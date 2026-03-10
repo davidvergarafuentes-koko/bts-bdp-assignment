@@ -1,9 +1,8 @@
 from typing import Annotated
-
 from fastapi import APIRouter, HTTPException, status
 from fastapi.params import Query
 from pydantic import BaseModel
-from pymongo import MongoClient, DESCENDING
+from pymongo import MongoClient
 
 from bdi_api.settings import Settings
 
@@ -30,23 +29,10 @@ class AircraftPosition(BaseModel):
     timestamp: str
 
 
-def _get_collection():
-    """
-    MongoDB connection helper.
-
-    Uses settings.mongo_url which should come from BDI_MONGO_URL env var.
-    Database name: bdi_aircraft
-    Collection name: positions
-    """
+def get_collection():
     client = MongoClient(settings.mongo_url)
     db = client["bdi_aircraft"]
-    col = db["positions"]
-
-    # Helpful indexes (safe to call multiple times)
-    col.create_index([("icao", 1), ("timestamp", -1)])
-    col.create_index([("type", 1)])
-
-    return col
+    return db["positions"]
 
 
 @s6.post("/aircraft")
@@ -58,11 +44,8 @@ def create_aircraft(position: AircraftPosition) -> dict:
     Database name: bdi_aircraft
     Collection name: positions
     """
-    col = _get_collection()
-
-    # Insert the position as a plain dict
-    col.insert_one(position.model_dump())
-
+    collection = get_collection()
+    collection.insert_one(position.model_dump())
     return {"status": "ok"}
 
 
@@ -74,16 +57,13 @@ def aircraft_stats() -> list[dict]:
 
     Use MongoDB's aggregation pipeline with $group.
     """
-    col = _get_collection()
-
+    collection = get_collection()
     pipeline = [
-        # If type is missing, it will group under null; that's fine unless your tests expect filtering.
         {"$group": {"_id": "$type", "count": {"$sum": 1}}},
-        {"$sort": {"count": -1}},
         {"$project": {"_id": 0, "type": "$_id", "count": 1}},
+        {"$sort": {"count": -1, "type": 1}},
     ]
-
-    return list(col.aggregate(pipeline))
+    return list(collection.aggregate(pipeline))
 
 
 @s6.get("/aircraft/")
@@ -102,11 +82,9 @@ def list_aircraft(
     Each result should include: icao, registration, type.
     Use MongoDB's skip() and limit() for pagination.
     """
-    col = _get_collection()
+    collection = get_collection()
     skip = (page - 1) * page_size
 
-    # Because this is time-series data, return DISTINCT aircraft (unique ICAO),
-    # using the latest seen registration/type for each ICAO.
     pipeline = [
         {"$sort": {"timestamp": -1}},
         {
@@ -117,13 +95,12 @@ def list_aircraft(
                 "type": {"$first": "$type"},
             }
         },
-        {"$sort": {"icao": 1}},  # stable ordering for pagination
+        {"$project": {"_id": 0, "icao": 1, "registration": 1, "type": 1}},
+        {"$sort": {"icao": 1}},
         {"$skip": skip},
         {"$limit": page_size},
-        {"$project": {"_id": 0, "icao": 1, "registration": 1, "type": 1}},
     ]
-
-    return list(col.aggregate(pipeline))
+    return list(collection.aggregate(pipeline))
 
 
 @s6.get("/aircraft/{icao}")
@@ -133,16 +110,12 @@ def get_aircraft(icao: str) -> dict:
     Return the most recent document matching the given ICAO code.
     If not found, return 404.
     """
-    col = _get_collection()
-
-    doc = col.find_one(
-        {"icao": icao},
-        sort=[("timestamp", DESCENDING)],
-        projection={"_id": 0},
-    )
+    collection = get_collection()
+    doc = collection.find_one({"icao": icao}, sort=[("timestamp", -1)])
     if doc is None:
-        raise HTTPException(status_code=404, detail="Not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aircraft not found")
 
+    doc.pop("_id", None)
     return doc
 
 
@@ -152,7 +125,6 @@ def delete_aircraft(icao: str) -> dict:
 
     Returns the number of deleted documents.
     """
-    col = _get_collection()
-
-    result = col.delete_many({"icao": icao})
+    collection = get_collection()
+    result = collection.delete_many({"icao": icao})
     return {"deleted": result.deleted_count}
